@@ -10,28 +10,41 @@ def k_precision(model: Module,
                 sketches_val_loader: DataLoader,
                 embedding_space: EmbeddingSpace,
                 k: int,
-                device: device) -> Tuple[float, float]:
-    # Corrected Labeled samples
+                device: device) -> float:
+    """
+    Calculate k-precision metric
+    Args:
+        model: The trained model
+        sketches_val_loader: DataLoader for validation sketches
+        embedding_space: Precomputed embedding space of photos
+        k: Number of top matches to consider
+        device: Device to run calculations on
+    Returns:
+        k-precision accuracy percentage
+    """
     correct = 0.0
     samples_val = 0
 
-    # IMPORTANT: from now on, since we will introduce batch norm,
-    # we have to tell PyTorch if we are training or evaluating our model
-    model = model.eval()
-    # Context-manager that disabled gradient calculation
+    model.eval()
     with torch.no_grad():
-        # Loop inside the data_loader
-        # The batch size is definited inside the data_loader
-        for idx_batch, (sketches, labels) in enumerate(sketches_val_loader):
-            sketches, labels = sketches.to(device), labels.to(device)
+        for sketches, labels in sketches_val_loader:
+            sketches = sketches.to(device)
+            labels = labels.to(device)
 
-            distances, topk_indexes = embedding_space.top_k_batch(sketches, k)
+            # Get top-k matches for each sketch
+            _, topk_indices = embedding_space.top_k_batch(sketches, k)
 
-            correct += torch.sum(torch.tensor([embedding_space.classes[idx] == labels[i]
-                                               for list_idx, i in zip(topk_indexes, list(range(len(topk_indexes))))
-                                               for idx in list_idx]).float()) / k
+            # Check if any of the top-k matches have the same label
+            for i in range(len(topk_indices)):
+                # Get the labels of the top-k matches
+                match_labels = torch.tensor([
+                    embedding_space.get_label(idx.item()) for idx in topk_indices[i]
+                ]).to(device)
+
+                # Check if the query label is in the matches
+                correct += torch.any(match_labels == labels[i]).float()
+
             samples_val += len(sketches)
 
     accuracy = 100. * correct / samples_val
-
     return accuracy

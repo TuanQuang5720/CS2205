@@ -1,37 +1,49 @@
 import torch
-from torch.nn import Module, Sequential, Linear, ReLU, Conv2d, MaxPool2d, AdaptiveMaxPool2d, Dropout
-from torchvision import models
+import torch.nn as nn
+import torchvision.models as models
+from torch.nn.functional import normalize
 
 
-'''
-The input received here is
-(BATCH_SIZE, INPUTS_LEN, CHANNELS = 3, HEIGHT = 256, WIDTH = 256)
-'''
-
-class SiameseNetwork(Module):
-
-    def __init__(self, output: int, backbone: models):
+class SiameseNetwork(nn.Module):
+    def __init__(self, output=16, backbone=models.resnet34(weights=models.ResNet34_Weights.DEFAULT)):
         super(SiameseNetwork, self).__init__()
+        self.backbone = nn.Sequential(*list(backbone.children())[:-1])  # Remove final FC layer
 
-        self.backbone = backbone
-
-        self.backbone.fc = Sequential(
-            Linear(self.backbone.fc.in_features, 256),
-            ReLU(inplace=True),
-            Linear(256, 128),
-            ReLU(inplace=True),
-            Linear(128, output)
+        # Add custom head for embedding
+        in_features = backbone.fc.in_features
+        self.head = nn.Sequential(
+            nn.Linear(in_features, 512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, output)
         )
 
-    def forward_once(self, x: torch.Tensor):
-        return self.backbone(x)
+    def forward_once(self, x):
+        # x shape should be [batch_size, channels, height, width]
 
-    def forward(self, inputs: torch.Tensor):
-        if len(inputs) == 2:
-            return torch.stack((self.forward_once(inputs[0]),
-                                self.forward_once(inputs[1])))
-        if len(inputs) == 3:
-            return torch.stack((self.forward_once(inputs[0]),
-                                self.forward_once(inputs[1]),
-                                self.forward_once(inputs[2]),))
-        raise ValueError(f'This is the SiameseBaseline, the number of input tensor is not 2 or 3 {inputs.size()}')
+        # Debugging: Print input shape
+        print(f"Input shape in forward_once: {x.shape}")
+
+        # Ensure we have proper 4D input [batch, channels, height, width]
+        if len(x.shape) == 3:
+            x = x.unsqueeze(0)  # Add batch dimension if missing
+
+        # Verify channel count
+        if x.shape[1] != 3:
+            raise ValueError(f"Expected 3 channels, got {x.shape[1]} channels")
+
+        return self.head(self.backbone(x).flatten(1))
+
+    def forward(self, x):
+        # x shape: [batch_size, num_images, channels, height, width]
+        # Process each image in the pair/triplet separately
+        original_shape = x.shape
+        x = x.reshape(-1, *original_shape[2:])  # Flatten first two dimensions
+
+        features = self.backbone(x)
+        features = features.reshape(features.size(0), -1)  # Flatten
+        embeddings = self.head(features)
+
+        # Reshape back to [batch_size, num_images, embedding_size]
+        embeddings = embeddings.reshape(original_shape[0], original_shape[1], -1)
+
+        return embeddings

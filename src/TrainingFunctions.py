@@ -49,7 +49,20 @@ def training_loop(num_epochs: int,
 
         # Calculate the k-accuracy
         embedding_space = EmbeddingSpace(model, images_dataloader, device)
-        k_prec = k_precision(model, sketches_test_loader, embedding_space, k, device)
+
+        class SingleImageLoader:
+            def __init__(self, original_loader):
+                self.original_loader = original_loader
+
+            def __iter__(self):
+                for inputs, targets in self.original_loader:
+                    # If inputs are pairs/triplets, take just the first image
+                    if len(inputs.shape) == 5:
+                        yield inputs[:, 0, :, :, :], targets
+                    else:
+                        yield inputs, targets
+
+        k_prec = k_precision(model, SingleImageLoader(sketches_test_loader), embedding_space, k, device)
 
         # Stop the timer for this step
         time_end = timer()
@@ -94,52 +107,32 @@ def training_loop(num_epochs: int,
             'time': time_loop}
 
 
-def train(optimizer: optim,
-          model: Module,
-          dataloader: DataLoader,
-          loss_func: Callable[[Tensor, Tensor], float],
-          accuracy_margin: float,
-          device: device) -> Tuple[float, float]:
-    # Initialize Metrics
+def train(optimizer, model, dataloader, loss_func, accuracy_margin, device):
+    model.train()
     correct = 0.0
     samples_train = 0
     loss_train = 0
     num_batches = len(dataloader)
 
-    # IMPORTANT: from now on, since we will introduce batch norm,
-    # we have to tell PyTorch if we are training or evaluating our model
-    model.train()
-
-    # Loop inside the train_loader
-    # The batch size is definited inside the train_loader
     for inputs, target in dataloader:
-        # In order to speed up the process I want to use the current device
         inputs, target = inputs.to(device), target.to(device)
 
-        inputs = torch.permute(inputs, (1, 0, 2, 3, 4))
+        # Ensure inputs are in correct shape [batch, num_images, C, H, W]
+        if len(inputs.shape) == 4:
+            inputs = inputs.unsqueeze(1)  # Add num_images dimension if missing
 
-        # Set the gradient of the available parameters to zero
+        inputs = inputs.permute(1, 0, 2, 3, 4)  # [num_images, batch, C, H, W]
+
         optimizer.zero_grad()
-
-        # Get the output of the model
         outputs = model(inputs)
 
-        # Here the model calculate the loss comparing true values and obtained values
         loss = loss_func(outputs, target)
+        loss_train += loss.item() * inputs.shape[1]  # Multiply by batch size
+        samples_train += inputs.shape[1]
 
-        # Update the total loss adding the loss of this particular batch
-        loss_train += loss.item() * len(inputs[0])
-
-        # Update the number of analyzed images
-        samples_train += len(inputs[0])
-
-        # Compute the gradient
         loss.backward()
-
-        # Update parameters considering the loss.backward() values
         optimizer.step()
 
-        # Update the number of correct predicted values adding the correct value of this batch
         correct += get_correct(outputs, target, accuracy_margin, device)
 
     loss_train /= samples_train
